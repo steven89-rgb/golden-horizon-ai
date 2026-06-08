@@ -1,0 +1,127 @@
+# =============================================================================
+# Golden Horizon AI Backend - Container stack
+# Podman/Docker compatible (compose spec).
+#
+#   Local dev :  podman compose up --build      (or: docker compose up --build)
+#   Rocky 8   :  podman compose up -d --build
+#
+# Security defaults:
+#   - postgres is NOT published to the host (internal network only)
+#   - openclaw is internal only (enabled in a later phase)
+#   - only backend (8000) and n8n (5678) bind host ports
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL + pgvector  (source of truth; never published publicly)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: docker.io/pgvector/pgvector:pg16
+    container_name: gh_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro,Z
+    # No host port mapping: reachable only on the internal network.
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - gh_network
+
+  # ---------------------------------------------------------------------------
+  # FastAPI backend
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    container_name: gh_backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health').status==200 else sys.exit(1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - gh_network
+
+  # ---------------------------------------------------------------------------
+  # N8N  (automation; persists to the shared Postgres)
+  # ---------------------------------------------------------------------------
+  n8n:
+    image: docker.io/n8nio/n8n:latest
+    container_name: gh_n8n
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME:-n8n}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      GENERIC_TIMEZONE: ${TZ:-UTC}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+      # Workflows call the backend over the internal network, never WooCommerce.
+      BACKEND_API_URL: http://backend:8000
+    volumes:
+      - n8n_data:/home/node/.n8n
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    networks:
+      - gh_network
+
+  # ---------------------------------------------------------------------------
+  # OpenClaw  (agent layer - internal only, never published).
+  # Enabled in a later phase once openclaw/ contains its service code.
+  # ---------------------------------------------------------------------------
+  # openclaw:
+  #   build:
+  #     context: .
+  #     dockerfile: docker/openclaw.Dockerfile
+  #   container_name: gh_openclaw
+  #   restart: unless-stopped
+  #   depends_on:
+  #     backend:
+  #       condition: service_healthy
+  #   environment:
+  #     BACKEND_API_URL: http://backend:8000
+  #     ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+  #   expose:
+  #     - "8100"
+  #   networks:
+  #     - gh_network
+
+volumes:
+  postgres_data:
+  n8n_data:
+
+networks:
+  gh_network:
+    driver: bridge

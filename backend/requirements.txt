@@ -1,0 +1,17 @@
+# --- Web framework ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+gunicorn==23.0.0
+
+# --- Data validation / settings ---
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+# --- Database (wired in Phase 2) ---
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+pgvector==0.3.6
+
+# --- HTTP client (connectors, Phase 3) ---
+httpx==0.28.1
